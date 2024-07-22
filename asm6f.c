@@ -48,6 +48,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <direct.h>  // For _getcwd and _chdir on Windows
 
 #define VERSION "1.6"
 
@@ -57,6 +58,7 @@
 #define BUFFSIZE 8192			// file buffer (inputbuff, outputbuff) size
 #define WORDMAX 128				// used with getword()
 #define LINEMAX 2048			// plenty of room for nested equates
+#define PATHMAX 512             // Should be more than long enough for any sensible path
 #define MAXPASSES 7				// # of tries before giving up
 #define IFNESTS 32				// max nested IF levels
 #define DEFAULTFILLER 0			// default fill value
@@ -491,6 +493,8 @@ char undefinedPC[]="PC is undefined (use ORG first)";
 char whitesp[]=" \t\r\n:";  //treat ":" like whitespace (for labels)
 char whitesp2[]=" \t\r\n\"";	//(used for filename processing)
 char tmpstr[LINEMAX];   //all purpose big string
+
+static char working_dir[PATHMAX]; //working directory
 
 int pass=0;
 int scope;//current scope, 0=global
@@ -1685,6 +1689,24 @@ void processfile(FILE *f, char* name) {
 	static int nest=0;
 	int nline=0;
 	int eof;
+	char current_dir[512];
+	char include_dir[512];
+	char *last_slash;
+
+	// Save the current directory
+	_getcwd(current_dir, sizeof(current_dir));
+
+	// Find the directory of the file being processed
+	last_slash = strrchr(name, '/');
+	if (!last_slash) last_slash = strrchr(name, '\\');
+
+	if (last_slash) {
+		strncpy(include_dir, name, last_slash - name);
+		include_dir[last_slash - name] = '\0';
+		// Change to the directory of the file being processed
+		_chdir(include_dir); 
+	}
+
 	nest++;//count nested include()s
 	do {
 		nline++;
@@ -1710,6 +1732,9 @@ void processfile(FILE *f, char* name) {
 		if(errmsg)
 			showerror(name,nline);
 	}
+
+	// Restore to the original working directory after processing
+	_chdir(current_dir); 
 }
 
 //process single line
@@ -1853,6 +1878,12 @@ int main(int argc,char **argv) {
 	char *nameptr;
 	label *p;
 	FILE *f;
+	
+	// Set the initial working directory
+    if (_getcwd(working_dir, sizeof(working_dir)) == NULL) {
+        perror("getcwd failed");
+        return 1;
+    }
 
 	if(argc<2) {
 		showhelp();
@@ -2242,11 +2273,36 @@ void nothing(label *id, char **next) {
 void include(label *id,char **next) {
 	char *np;
 	FILE *f;
+	char current_dir[512];
+	char include_path[512];
+	char* last_slash;
+
+	// Save the current directory
+	_getcwd(current_dir, sizeof(current_dir));
 
 	np=*next;
 	reverse(tmpstr,np+strspn(np,whitesp2));	 //eat whitesp off both ends
 	reverse(np,tmpstr+strspn(tmpstr,whitesp2));
+
+	// Check if the file exists in the current directory
 	f=fopen(np,"r+");   //read as text, the + makes recursion not possible
+
+	if (!f) {
+		// Construct the include path relative to the initial working directory
+		snprintf(include_path, sizeof(include_path), "%s/%s", working_dir, np);
+		f = fopen(include_path, "r+");
+
+		if (f) {
+			// Change to the directory of the found include file
+			last_slash = strrchr(include_path, '/');
+			if (!last_slash) last_slash = strrchr(include_path, '\\');
+			if (last_slash) {
+				*last_slash = '\0';
+				_chdir(include_path);
+			}
+		}
+	}
+
 	if(!f) {
 		errmsg=CantOpen;
 		error=1;
@@ -2255,6 +2311,10 @@ void include(label *id,char **next) {
 		fclose(f);
 		errmsg=0;//let main() know file was ok
 	}
+
+	// Restore to the initial working directory after processing
+	_chdir(current_dir); 
+
 	*next=np+strlen(np);//need to play safe because this could be the main srcfile
 }
 
